@@ -1,0 +1,37 @@
+services:
+  certificate-manager:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: corntech-certificate-manager:latest
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 30s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    ports:
+      - "${CERT_PORT:-8080}:8080"
+    environment:
+      CERT_HOST: 0.0.0.0
+      CERT_PORT: 8080
+      CERT_DB: /app/out/certificates.db
+      CERT_WEB_DIR: /app/web
+      ROOTPASS: "${ROOTPASS:?Set ROOTPASS in .env or the shell before starting}"
+    volumes:
+      - certificate-data:/app/out
+    healthcheck:
+      test:
+        - CMD
+        - python3
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/api/health', timeout=3).read()"
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+volumes:
+  certificate-data:
+    name: corntech-certificate-data

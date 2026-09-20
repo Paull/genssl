@@ -117,6 +117,19 @@ ROOTPASS='change-me' python3 server.py --host 0.0.0.0 --port 8080
 
 首次运行后打开 <http://127.0.0.1:8080/>，点击“初始化根 CA”，或直接调用 `POST /api/ca/initialize`。服务会在 `out/` 下保存根证书、签发文件和 SQLite 登记库；`flush.sh` 可在停止服务后清空这些本地状态。
 
+### Docker Compose 生产部署
+
+仓库提供多阶段 `Dockerfile` 和 `docker-compose.yml`。Bun 只用于构建前端，运行容器只包含 Python、OpenSSL 和生成后的静态资源。证书、CA 密钥、OpenSSL 状态文件和 SQLite 数据库保存在名为 `corntech-certificate-data` 的 Docker volume 中。
+
+```bash
+cp .env.example .env
+# 编辑 .env，设置强随机 ROOTPASS
+docker compose up --build -d
+docker compose ps
+```
+
+容器健康检查使用 `/api/health`；服务正常后访问 <http://127.0.0.1:8080/>，在界面中初始化根 CA。修改 `.env` 中的 `CERT_PORT` 可以更换宿主机端口。备份生产数据时停止服务并备份该 volume；不要删除它，否则会丢失根 CA 私钥和已签发证书。
+
 ### Bun E2E 测试
 
 E2E 测试使用 Bun 的测试运行器、Playwright 浏览器客户端和临时的隔离 CA/API 实例，不会修改项目的 `out/` 数据。首次运行需要用 Bun 下载 Chromium：
