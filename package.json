@@ -1,0 +1,27 @@
+{
+  "name": "corntech-certificate-manager",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "build": "bun run scripts/build.ts",
+    "dev": "bun --watch scripts/build.ts",
+    "start": "bun run build && python3 server.py",
+    "typecheck": "bunx --no-install tsc --noEmit",
+    "check": "bun run typecheck && bun run scripts/build.ts",
+    "test": "bun test --no-orphans",
+    "e2e": "bun run build && bun test e2e --timeout 240000 --no-orphans",
+    "e2e:install": "bunx playwright install chromium",
+    "devctl": "bash scripts/devctl.sh",
+    "dev:start": "bun run devctl start",
+    "dev:stop": "bun run devctl stop",
+    "dev:restart": "bun run devctl restart",
+    "dev:reload": "bun run devctl reload",
+    "dev:status": "bun run devctl status",
+    "dev:logs": "bun run devctl logs"
+  },
+  "devDependencies": {
+    "playwright": "^1.63.0",
+    "typescript": "^7.0.2"
+  }
+}

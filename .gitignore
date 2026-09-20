@@ -1,0 +1,44 @@
+# Generated certificates and local CA state
+/out/
+*.sqlite3
+*.sqlite3-*
+*.db
+*.db-*
+*.log
+
+# Python runtime artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+node_modules/
+.dev/
+
+# Bun frontend build output (regenerate with `bun run build`)
+/web/app.js
+/web/app.css
+/web/styles.css
+/web/*.map
+
+# Local task/session state
+/.planning/
+
+# Single-machine development controller state (PIDs and process logs)
+/.dev/
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# Existing certificate artifacts created beside scripts
+/*.crt
+/*.key
+/*.csr
+/*.p12
+/*.pem
