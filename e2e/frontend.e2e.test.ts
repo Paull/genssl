@@ -82,12 +82,15 @@ async function startFixture(): Promise<Fixture> {
   }
 }
 
-async function apiPost(baseURL: string, path: string, body: Record<string, unknown>): Promise<Response> {
-  return fetch(`${baseURL}/api${path}`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(body),
+async function apiRequest(baseURL: string, path: string, options: RequestInit = {}): Promise<Response> {
+  return fetch(`${baseURL}${path}`, {
+    ...options,
+    headers: { ...(options.body ? { 'content-type': 'application/json' } : {}), ...(options.headers || {}) },
   });
+}
+
+async function apiPost(baseURL: string, path: string, body: Record<string, unknown>): Promise<Response> {
+  return apiRequest(baseURL, `/api${path}`, { method: 'POST', body: JSON.stringify(body) });
 }
 
 async function dashboard(page: Page, baseURL: string): Promise<void> {
@@ -111,6 +114,12 @@ async function newPage(): Promise<Page> {
   const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
   page.setDefaultTimeout(240_000);
   return page;
+}
+
+async function refreshFromUI(page: Page, baseURL: string, selector: string): Promise<void> {
+  const responses = Promise.all(['/api/certificates', '/api/registrations', '/api/ca'].map((path) => page.waitForResponse((response) => response.url() === `${baseURL}${path}` && response.request().method() === 'GET')));
+  await page.locator(selector).click();
+  expect((await responses).every((response) => response.status() === 200)).toBe(true);
 }
 
 beforeAll(async () => {
@@ -238,6 +247,186 @@ describe('user frontend', () => {
       expect(await textOf(page, '#table-count')).toBe('显示 1 / 2 张证书');
     } finally {
       await page.close();
+      await fixture.stop();
+    }
+  });
+
+  test('completes the first-run golden path from CA setup to artifact downloads', async () => {
+    const fixture = await startFixture();
+    const page = await newPage();
+    const suffix = Date.now();
+    const appName = `golden-orders-${suffix}`;
+    const serverName = `golden-server-${suffix}`;
+    const clientName = `golden-client-${suffix}`;
+    const san = `api.${serverName}.example`;
+    try {
+      await dashboard(page, fixture.baseURL);
+
+      await page.locator('[data-action="init-ca"]').click();
+      await page.locator('#ca-rootpass').fill(rootPassword);
+      const caResponse = page.waitForResponse((response) => response.url() === `${fixture.baseURL}/api/ca/initialize` && response.request().method() === 'POST');
+      await page.locator('#ca-form button[type="submit"]').click();
+      expect((await caResponse).status()).toBe(200);
+      await page.waitForFunction(() => !document.querySelector('#overlay')?.classList.contains('open'));
+      await expectText(page, '#ca-status-title', 'CA 状态正常');
+
+      await page.locator('[data-action="register"]').click();
+      await page.locator('#registration-name').fill(appName);
+      await page.locator('#registration-owner').fill('golden-platform');
+      await page.locator('#registration-notes').fill('production-like browser journey');
+      const registrationResponse = page.waitForResponse((response) => response.url() === `${fixture.baseURL}/api/registrations` && response.request().method() === 'POST');
+      await page.locator('#registration-form button[type="submit"]').click();
+      expect((await registrationResponse).status()).toBe(201);
+      await page.locator('.registration-card').filter({ hasText: appName }).waitFor({ state: 'visible' });
+
+      await page.locator('[data-nav="certificates"]').click();
+      expect(await page.locator('[data-nav="certificates"]').getAttribute('aria-current')).toBe('page');
+      await page.locator('[data-nav="dashboard"]').click();
+      expect(await page.locator('[data-nav="dashboard"]').getAttribute('aria-current')).toBe('page');
+
+      await page.locator('[data-action="generate"]').click();
+      await page.locator('#issue-name').fill(serverName);
+      await page.locator('#issue-sans').fill(`${san}\n10.0.0.20`);
+      await page.locator('#issue-days').fill('398');
+      await page.locator('#issue-key').selectOption('both');
+      const serverResponse = page.waitForResponse((response) => response.url() === `${fixture.baseURL}/api/certificates` && response.request().method() === 'POST');
+      await page.locator('#issue-submit').click();
+      expect((await serverResponse).status()).toBe(201);
+      const serverRow = page.locator('#cert-list tr').filter({ hasText: serverName });
+      await serverRow.waitFor({ state: 'visible', timeout: 180_000 });
+      expect((await serverRow.locator('.key-pill').textContent())?.toLowerCase()).toBe('both');
+
+      const serverId = await serverRow.locator('[data-action="detail"]').getAttribute('data-id');
+      const serverDetail = page.waitForResponse((response) => response.url() === `${fixture.baseURL}/api/certificates/${serverId}` && response.request().method() === 'GET');
+      await serverRow.locator('[data-action="detail"]').click();
+      expect((await serverDetail).status()).toBe(200);
+      await expectText(page, '.drawer', san);
+      expect(await page.locator('.drawer .file-item a[download]').count()).toBeGreaterThan(0);
+      const fileDownload = page.waitForEvent('download');
+      await page.locator('.drawer .file-item a[download]').first().click();
+      expect((await fileDownload).suggestedFilename()).toMatch(new RegExp(serverName));
+      const zipDownload = page.waitForEvent('download');
+      await page.locator('.drawer-footer a[download]').click();
+      expect((await zipDownload).suggestedFilename()).toMatch(new RegExp(serverName));
+      await page.locator('.close-button').click();
+
+      await page.locator('[data-action="generate"]').click();
+      await page.locator('input[name="type"][value="client"]').check();
+      await page.locator('#issue-name').fill(clientName);
+      await page.locator('#issue-days').fill('365');
+      await page.locator('#issue-key').selectOption('both');
+      await page.locator('#issue-rootpass').fill(rootPassword);
+      expect(await page.locator('#issue-sans').isDisabled()).toBe(true);
+      const clientResponse = page.waitForResponse((response) => response.url() === `${fixture.baseURL}/api/certificates` && response.request().method() === 'POST');
+      await page.locator('#issue-submit').click();
+      expect((await clientResponse).status()).toBe(201);
+      const clientRow = page.locator('#cert-list tr').filter({ hasText: clientName });
+      await clientRow.waitFor({ state: 'visible', timeout: 180_000 });
+      expect((await clientRow.locator('.key-pill').textContent())?.toLowerCase()).toBe('both');
+      const clientId = await clientRow.locator('[data-action="detail"]').getAttribute('data-id');
+      const clientDetail = page.waitForResponse((response) => response.url() === `${fixture.baseURL}/api/certificates/${clientId}` && response.request().method() === 'GET');
+      await clientRow.locator('[data-action="detail"]').click();
+      expect((await clientDetail).status()).toBe(200);
+      await expectText(page, '.drawer', '客户端证书');
+      await expectText(page, '.drawer', '文件');
+      await page.locator('.close-button').click();
+
+      await page.locator('[data-filter="server"]').click();
+      expect(await page.locator('#cert-list tr').filter({ hasText: serverName }).count()).toBe(1);
+      expect(await page.locator('#cert-list tr').filter({ hasText: clientName }).count()).toBe(0);
+      await page.locator('[data-filter="client"]').click();
+      expect(await page.locator('#cert-list tr').filter({ hasText: clientName }).count()).toBe(1);
+      await page.locator('[data-filter="all"]').click();
+      await page.locator('#search-input').fill('does-not-exist');
+      await expectText(page, '#cert-list', '没有匹配的证书');
+      await page.locator('#search-input').fill(san);
+      expect(await textOf(page, '#table-count')).toBe('显示 1 / 2 张证书');
+      await page.locator('#search-input').fill('');
+
+      await refreshFromUI(page, fixture.baseURL, '#refresh-button');
+      await refreshFromUI(page, fixture.baseURL, '#table-refresh');
+      await page.locator('[data-nav="applications"]').click();
+      await page.locator('.registration-card').filter({ hasText: appName }).waitFor({ state: 'visible' });
+
+      await page.reload({ waitUntil: 'domcontentloaded' });
+      await dashboard(page, fixture.baseURL);
+      expect(await textOf(page, '#metric-total')).toBe('2');
+      await page.locator('#cert-list tr').filter({ hasText: serverName }).waitFor({ state: 'visible' });
+      await page.locator('#cert-list tr').filter({ hasText: clientName }).waitFor({ state: 'visible' });
+      await page.locator('.registration-card').filter({ hasText: appName }).waitFor({ state: 'visible' });
+    } finally {
+      await page.close();
+      await fixture.stop();
+    }
+  });
+
+  test('keeps documented API, download, and static compatibility paths working', async () => {
+    const fixture = await startFixture();
+    try {
+      const health = await apiRequest(fixture.baseURL, '/api/health');
+      expect(health.status).toBe(200);
+      const healthBody = await health.json() as { status: string; certificates: number };
+      expect(healthBody.status).toBe('ok');
+      expect(healthBody.certificates).toBe(0);
+
+      const ca = await apiRequest(fixture.baseURL, '/api/ca');
+      const roots = await apiRequest(fixture.baseURL, '/api/roots');
+      const v1Certificates = await apiRequest(fixture.baseURL, '/api/v1/certificates');
+      expect(ca.status).toBe(200);
+      expect(roots.status).toBe(200);
+      const caBody = await ca.clone().text();
+      expect(await roots.text()).toBe(caBody);
+      expect(v1Certificates.status).toBe(200);
+      expect((await v1Certificates.json()).total).toBe(0);
+
+      const options = await apiRequest(fixture.baseURL, '/api/certificates', { method: 'OPTIONS' });
+      expect(options.status).toBe(204);
+      expect(options.headers.get('access-control-allow-methods')).toContain('POST');
+      const assetHead = await apiRequest(fixture.baseURL, '/app.js', { method: 'HEAD' });
+      const spaHead = await apiRequest(fixture.baseURL, '/dashboard', { method: 'HEAD' });
+      expect(assetHead.status).toBe(200);
+      expect(assetHead.headers.get('content-type')).toContain('javascript');
+      expect(spaHead.status).toBe(200);
+      expect(spaHead.headers.get('content-type')).toContain('text/html');
+
+      const registration = await apiPost(fixture.baseURL, '/registrations', { name: 'compat-app', owner: 'e2e', notes: 'compatibility' });
+      expect(registration.status).toBe(201);
+      expect((await apiRequest(fixture.baseURL, '/api/registrations')).status).toBe(200);
+      expect((await apiPost(fixture.baseURL, '/ca/initialize', { rootpass: rootPassword })).status).toBe(200);
+      const badIssue = await apiPost(fixture.baseURL, '/certificates', { type: 'server', name: 'bad-input', sans: ['bad value'] });
+      expect(badIssue.status).toBe(400);
+
+      const issue = await apiPost(fixture.baseURL, '/certificates', { type: 'server', name: 'compat-service', sans: ['compat.example', '10.0.0.30'], days: 30, key_type: 'both', rootpass: rootPassword });
+      expect(issue.status).toBe(201);
+      const record = await issue.json() as { id: number; files: string[] };
+      const serverList = await apiRequest(fixture.baseURL, '/api/certificates?type=server');
+      const clientList = await apiRequest(fixture.baseURL, '/api/certificates?type=client');
+      const v1ClientList = await apiRequest(fixture.baseURL, '/api/v1/certificates?type=client');
+      expect((await serverList.json()).total).toBe(1);
+      expect((await clientList.json()).total).toBe(0);
+      expect((await v1ClientList.json()).total).toBe(0);
+      const detail = await apiRequest(fixture.baseURL, `/api/certificates/${record.id}`);
+      expect(detail.status).toBe(200);
+      const detailBody = await detail.json() as { files: string[] };
+      expect(detailBody.files.length).toBeGreaterThan(0);
+      const firstFile = detailBody.files[0];
+      const fileResponse = await apiRequest(fixture.baseURL, `/api/certificates/${record.id}/files/${encodeURIComponent(firstFile)}`);
+      expect(fileResponse.status).toBe(200);
+      expect((await fileResponse.arrayBuffer()).byteLength).toBeGreaterThan(0);
+      const archive = await apiRequest(fixture.baseURL, `/api/certificates/${record.id}/download`);
+      expect(archive.status).toBe(200);
+      expect(archive.headers.get('content-type')).toContain('application/zip');
+      expect(new Uint8Array(await archive.arrayBuffer()).slice(0, 2)).toEqual(new Uint8Array([80, 75]));
+      for (const format of ['crt', 'key', 'p12', 'pem', 'bundle']) {
+        const formatted = await apiRequest(fixture.baseURL, `/api/certificates/${record.id}/download?format=${format}`);
+        expect(formatted.status).toBe(200);
+        expect((await formatted.arrayBuffer()).byteLength).toBeGreaterThan(0);
+      }
+      expect((await apiRequest(fixture.baseURL, `/api/certificates/${record.id}/download?format=unknown`)).status).toBe(400);
+      expect((await apiRequest(fixture.baseURL, `/api/certificates/${record.id}/files/%2e%2e%2fserver.py`)).status).toBe(404);
+      expect((await apiRequest(fixture.baseURL, `/api/certificates/${record.id + 999}/download`)).status).toBe(404);
+      expect((await apiRequest(fixture.baseURL, '/api/certificates/not-an-id')).status).toBe(400);
+    } finally {
       await fixture.stop();
     }
   });
