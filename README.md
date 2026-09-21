@@ -80,7 +80,35 @@ GET  /api/registrations
 POST /api/registrations
 ```
 
-构建后的页面只依赖浏览器原生 JavaScript；在线服务面向单机/内网集中管控，暂不包含认证、吊销和二级代理商功能。
+### 管理界面截图
+
+下面的截图来自隔离的 E2E 运行环境，展示了从首次进入到证书详情的主要管理界面。可以用 `bun run screenshots` 重新生成。
+
+#### 证书总览（首次进入）
+
+![证书总览](docs/screenshots/dashboard-empty.png)
+
+#### 初始化根 CA
+
+![初始化根 CA](docs/screenshots/ca-initialization.png)
+
+#### 生成服务器证书
+
+![生成证书](docs/screenshots/certificate-generation.png)
+
+#### 登记应用
+
+![登记应用](docs/screenshots/application-registration.png)
+
+#### 证书总览（已有证书和应用）
+
+![已有证书和应用的总览](docs/screenshots/dashboard-managed.png)
+
+#### 证书详情和文件下载
+
+![证书详情](docs/screenshots/certificate-detail.png)
+
+构建后的页面只依赖浏览器原生 JavaScript；在线服务面向单机/内网集中管控，支持 Basic Auth，暂不包含细粒度用户/角色、吊销和二级代理商功能。
 
 ### 使用 Bun 构建界面
 

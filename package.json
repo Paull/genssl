@@ -11,6 +11,7 @@
     "check": "bun run typecheck && bun run scripts/build.ts",
     "test": "bun test --no-orphans",
     "e2e": "bun run build && bun test e2e --timeout 240000 --no-orphans",
+    "screenshots": "bun run build && bun run scripts/capture-screenshots.ts",
     "e2e:install": "bunx playwright install chromium",
     "devctl": "bash scripts/devctl.sh",
     "dev:start": "bun run devctl start",
