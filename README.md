@@ -80,6 +80,10 @@ GET  /api/registrations
 POST /api/registrations
 ```
 
+### 双向证书（mTLS）使用
+
+创建好的服务器证书和客户端证书可以用于双向 TLS：Nginx 验证客户端证书，客户端验证服务器证书。完整的证书准备、Nginx 配置、curl/浏览器验证步骤和 400/证书选择界面截图见 [双向证书使用介绍](docs/mutual-tls.md)。
+
 ### 管理界面截图
 
 下面的截图来自隔离的 E2E 运行环境，展示了从首次进入到证书详情的主要管理界面。可以用 `bun run screenshots` 重新生成。
