@@ -18,12 +18,22 @@ interface Certificate {
 }
 interface Registration { id: number; name: string; owner?: string; notes?: string; created_at?: string; }
 interface CAStatus { available?: boolean; roots?: { name: string; available: boolean }[]; }
-type DataErrors = { certificates: string | null; registrations: string | null; ca: string | null; }
+interface User { id?: number | string; username: string; role?: 'admin' | 'agent' | string; agent_id?: number | string | null; agent_name?: string | null; agent?: Agent; display_name?: string; active?: boolean; status?: string; }
+interface Agent { id: number | string; name: string; code?: string; notes?: string; status?: string; active?: boolean; users?: User[]; created_at?: string; }
+interface AuthState { enabled: boolean; loading: boolean; authenticated: boolean; token: string | null; user: User | null; }
+type DataErrors = { certificates: string | null; registrations: string | null; ca: string | null; agents?: string | null; }
+
+class ApiError extends Error {
+  readonly status: number;
+  constructor(status: number, message: string) { super(message); this.name = 'ApiError'; this.status = status; }
+}
 
 const API = '/api';
-const state: { certificates: Certificate[]; registrations: Registration[]; ca: CAStatus | null; filter: Filter; query: string; service: boolean; loadError: string | null; errors: DataErrors } = {
-  certificates: [], registrations: [], ca: null, filter: 'all', query: '', service: false, loadError: null, errors: { certificates: null, registrations: null, ca: null },
+const state: { certificates: Certificate[]; registrations: Registration[]; ca: CAStatus | null; agents: Agent[]; accounts: User[]; selectedAgentId: string; filter: Filter; query: string; service: boolean; loadError: string | null; errors: DataErrors; auth: AuthState } = {
+  certificates: [], registrations: [], ca: null, agents: [], accounts: [], selectedAgentId: '', filter: 'all', query: '', service: false, loadError: null, errors: { certificates: null, registrations: null, ca: null, agents: null },
+  auth: { enabled: false, loading: true, authenticated: false, token: null, user: null },
 };
+const TOKEN_KEY = 'corntech.auth.token';
 let toastTimer: ReturnType<typeof setTimeout> | undefined;
 let lastFocused: HTMLElement | null = null;
 
@@ -63,27 +73,46 @@ const daysLeft = (cert: Certificate): number | null => {
 const visibleCerts = (): Certificate[] => state.certificates.filter((cert) => (state.filter === 'all' || certType(cert) === state.filter) && (!state.query || `${cert.name} ${(cert.sans || []).join(' ')}`.toLowerCase().includes(state.query.toLowerCase())));
 const initials = (name: string): string => name.trim().split(/\s+/).map((part) => part[0]).join('').slice(0, 2).toUpperCase() || '—';
 
+function authHeaders(): Record<string, string> { return state.auth.token ? { Authorization: `Bearer ${state.auth.token}` } : {}; }
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
-  const response = await fetch(API + path, { ...options, headers: { Accept: 'application/json', ...(options.body ? { 'Content-Type': 'application/json' } : {}), ...(options.headers || {}) } });
+  const response = await fetch(API + path, { ...options, headers: { Accept: 'application/json', ...(options.body ? { 'Content-Type': 'application/json' } : {}), ...authHeaders(), ...(options.headers || {}) } });
   const contentType = response.headers.get('content-type') || '';
   const payload = contentType.includes('json') ? await response.json() : await response.text();
-  if (!response.ok) throw new Error(typeof payload === 'object' && payload ? (payload.error || payload.detail || '请求失败') : String(payload || response.statusText));
+  if (!response.ok) {
+    const message = typeof payload === 'object' && payload ? (payload.error || payload.detail || '请求失败') : String(payload || response.statusText);
+    if (response.status === 401 && state.auth.authenticated) expireSession();
+    throw new ApiError(response.status, message);
+  }
   return payload as T;
 }
+
+const listPayload = <T>(payload: T[] | { items?: T[]; data?: T[] } | T): T[] => Array.isArray(payload) ? payload : ((payload as { items?: T[]; data?: T[] })?.items || (payload as { data?: T[] })?.data || []);
+const userFromPayload = (payload: unknown): User | null => {
+  if (!payload || typeof payload !== 'object') return null;
+  const value = payload as { user?: User; account?: User; data?: { user?: User } | User };
+  const user = value.user || value.account || (value.data && ('username' in value.data ? value.data as User : value.data.user));
+  return user && typeof user === 'object' && user.username ? user : null;
+};
+const normalizeToken = (payload: unknown): string | null => {
+  if (!payload || typeof payload !== 'object') return null;
+  const value = payload as { token?: string; access_token?: string; data?: { token?: string; access_token?: string } };
+  return value.token || value.access_token || value.data?.token || value.data?.access_token || null;
+};
 
 function shell(): string {
   return `<aside class="sidebar">
     <div class="brand"><div class="brand-mark">${svg('shield')}</div><div class="brand-text"><strong>CornTech</strong><span>证书中心 · 单机版</span></div></div>
     <div class="sidebar-divider"></div><div class="nav-caption">工作台</div>
-    <nav class="nav-list" aria-label="工作区"><button class="nav-item active" data-nav="dashboard" aria-current="page">${svg('grid')}<span>总览</span><b class="nav-count" id="nav-total">—</b></button><button class="nav-item" data-nav="certificates" aria-current="false">${svg('certificate')}<span>证书</span></button><button class="nav-item" data-nav="applications" aria-current="false">${svg('users')}<span>应用登记</span></button></nav>
-    <div class="sidebar-bottom"><div class="ca-mini"><div class="ca-mini-head"><span>${svg('shield')} CA 根状态</span><i class="ca-pulse warn" id="ca-pulse"></i></div><div class="ca-mini-value" id="ca-mini-value">正在检查…</div><small id="ca-mini-meta">RSA · EC</small></div><div class="profile"><div class="avatar">CT</div><div><strong>本地工作区</strong><span>无远程连接</span></div></div></div>
+    <nav class="nav-list" aria-label="工作区"><button class="nav-item active" data-nav="dashboard" aria-current="page">${svg('grid')}<span>总览</span><b class="nav-count" id="nav-total">—</b></button><button class="nav-item" data-nav="certificates" aria-current="false">${svg('certificate')}<span id="cert-nav-label">证书</span></button><button class="nav-item" data-nav="applications" aria-current="false">${svg('users')}<span>应用登记</span></button><button class="nav-item admin-only" data-nav="agents" aria-current="false" hidden>${svg('users')}<span>代理商与账户</span></button></nav>
+    <div class="sidebar-bottom"><div class="ca-mini"><div class="ca-mini-head"><span>${svg('shield')} CA 根状态</span><i class="ca-pulse warn" id="ca-pulse"></i></div><div class="ca-mini-value" id="ca-mini-value">正在检查…</div><small id="ca-mini-meta">RSA · EC</small></div><div class="profile" id="profile-card"><div class="avatar" id="profile-avatar">CT</div><div class="profile-copy"><strong id="profile-name">本地工作区</strong><span id="profile-role">无远程连接</span></div><button class="ghost-button compact logout-button" id="logout-button" type="button" hidden>退出</button></div></div>
   </aside>
   <main class="main"><header class="topbar"><div class="breadcrumb"><strong>工作台</strong><span>　/　证书总览</span></div><div class="top-actions"><span class="connection"><i class="connection-dot offline" id="connection-dot"></i><span id="connection-text">连接中…</span></span><button class="icon-button" id="refresh-button" title="刷新数据" aria-label="刷新数据">${svg('refresh')}</button></div></header>
     <section class="page-heading" id="dashboard-section"><div><h1>证书总览</h1><p>统一签发、登记和管理应用证书</p></div><button class="primary-button" data-action="generate">${svg('plus')}生成证书</button></section>
     <section class="metrics"><article class="metric-card"><div class="metric-top"><span>证书总数</span><i class="metric-icon blue">${svg('certificate')}</i></div><strong class="metric-value" id="metric-total">—</strong><span class="metric-detail" id="metric-total-detail">等待数据</span></article><article class="metric-card"><div class="metric-top"><span>服务器证书</span><i class="metric-icon teal">${svg('shield')}</i></div><strong class="metric-value" id="metric-server">—</strong><span class="metric-detail">含 SAN 域名</span></article><article class="metric-card"><div class="metric-top"><span>客户端证书</span><i class="metric-icon orange">${svg('users')}</i></div><strong class="metric-value" id="metric-client">—</strong><span class="metric-detail">应用身份认证</span></article><article class="metric-card"><div class="metric-top"><span>即将到期</span><i class="metric-icon red">${svg('clock')}</i></div><strong class="metric-value" id="metric-expiring">—</strong><span class="metric-detail">未来 30 天内</span></article></section>
     <div class="content-grid"><section class="panel" id="certificates-section"><div class="panel-header"><div><h2>证书清单</h2><p id="list-caption">所有已签发证书</p></div><div class="panel-tools"><div class="search-box"><label class="sr-only" for="search-input">搜索名称或 SAN</label>${svg('search')}<input id="search-input" type="search" placeholder="搜索名称或 SAN" autocomplete="off" /></div><div class="segmented" role="tablist" aria-label="证书类型"><button class="active" role="tab" aria-selected="true" data-filter="all">全部</button><button role="tab" aria-selected="false" data-filter="server">服务器</button><button role="tab" aria-selected="false" data-filter="client">客户端</button></div></div></div><div class="cert-table-wrap"><table><thead><tr><th>证书名称</th><th>类型</th><th>密钥</th><th>有效期</th><th>状态</th><th></th></tr></thead><tbody id="cert-list"><tr class="empty-row"><td colspan="6">正在读取证书…</td></tr></tbody></table></div><div class="table-footer"><span id="table-count">—</span><button class="ghost-button compact" id="table-refresh" aria-label="刷新证书清单">${svg('refresh')}刷新</button></div></section><aside class="side-stack"><section class="panel activity-panel"><div class="panel-header"><div><h2>最近动态</h2><p>本地操作记录</p></div></div><div class="activity-list" id="activity-list"><div class="no-data">暂无动态</div></div></section><section class="panel ca-panel"><div class="panel-header"><div><h2>CA 根证书</h2><p>签发链状态</p></div></div><div class="ca-body"><div class="ca-status-line"><i class="status-mark" id="ca-status-icon">${svg('clock')}</i><div><strong id="ca-status-title">正在检查</strong><span id="ca-status-subtitle">读取本地根证书</span></div></div><div class="ca-roots" id="ca-roots"></div><button class="ghost-button compact ca-action" data-action="init-ca">初始化 / 更新 CA</button></div></section></aside></div>
-    <section class="panel registrations-panel" id="applications-section"><div class="panel-header"><div><h2>应用登记</h2><p>追踪证书归属的应用与容器</p></div><button class="ghost-button compact" data-action="register">${svg('plus')}登记应用</button></div><div class="registration-list" id="registration-list"><div class="no-data">正在读取登记信息…</div></div></section>
-  </main><div id="overlay" class="overlay" aria-hidden="true"></div><div id="toast-region" aria-live="polite"></div>`;
+    <section class="panel registrations-panel" id="applications-section"><div class="panel-header"><div><h2 id="applications-title">应用登记</h2><p id="applications-caption">追踪证书归属的应用与容器</p></div><button class="ghost-button compact" data-action="register">${svg('plus')}登记应用</button></div><div class="registration-list" id="registration-list"><div class="no-data">正在读取登记信息…</div></div></section>
+    <section class="panel admin-panel" id="admin-section" hidden><div class="panel-header"><div><h2>代理商与账户</h2><p>管理员工作区 · 账号和证书归属由服务端权限控制</p></div><div class="panel-tools"><button class="ghost-button compact" data-action="create-agent">${svg('plus')}新增代理商</button><button class="ghost-button compact" data-action="create-account">${svg('plus')}新增账户</button></div></div><div class="admin-grid"><div><h3 class="admin-subtitle">代理商</h3><div id="agent-list" class="admin-list"><div class="no-data">正在读取代理商…</div></div></div><div><h3 class="admin-subtitle">账户</h3><div id="account-list" class="admin-list"><div class="no-data">正在读取账户…</div></div></div></div></section>
+  </main><div id="auth-gate" class="auth-gate" hidden><form id="login-form" class="auth-card"><div class="brand-mark">${svg('shield')}</div><h1>登录证书中心</h1><p>请输入管理员或代理商账户。</p><label class="form-label" for="login-username">用户名</label><input class="form-control" id="login-username" name="username" autocomplete="username" required /><label class="form-label" for="login-password">密码</label><input class="form-control" id="login-password" name="password" type="password" autocomplete="current-password" required /><button class="primary-button" type="submit">登录</button><div id="login-error" class="form-hint" role="alert"></div></form></div><div id="overlay" class="overlay" aria-hidden="true"></div><div id="toast-region" aria-live="polite"></div>`;
 }
 
 function renderMetrics(): void {
@@ -122,7 +151,7 @@ function renderCerts(): void {
     const left = daysLeft(cert);
     const statusClass = left === null ? 'unknown' : left < 0 ? 'expired' : left <= 30 ? 'warn' : '';
     const statusText = left === null ? '未知' : left < 0 ? '已过期' : left <= 30 ? `${left} 天后到期` : '有效';
-    return `<tr><td><div class="cert-name"><i class="cert-mark ${type === 'client' ? 'client' : ''}">${svg(type === 'client' ? 'users' : 'shield')}</i><div><strong title="${esc(cert.name)}">${esc(cert.name)}</strong><small>ID #${esc(cert.id)} · ${esc((cert.sans || []).length ? `${cert.sans?.length} 个 SAN` : '无 SAN')}</small></div></div></td><td><span class="type-pill ${type}">${type === 'server' ? '服务器' : '客户端'}</span></td><td><span class="key-pill">${esc(cert.key_type || 'RSA')}</span></td><td><div class="date-cell"><strong>${esc(date(cert.expires_at))}</strong><small>签发于 ${esc(date(cert.created_at))}</small></div></td><td><span class="status-pill ${statusClass}"><i>●</i>${statusText}</span></td><td><div class="row-actions"><button class="row-action" data-action="detail" data-id="${esc(cert.id)}" title="查看详情" aria-label="查看 ${esc(cert.name)} 详情">${svg('eye')}</button><a class="row-action" href="${API}/certificates/${encodeURIComponent(certId(cert))}/download" title="下载 ZIP" aria-label="下载 ${esc(cert.name)} ZIP">${svg('download')}</a></div></td></tr>`;
+    return `<tr><td><div class="cert-name"><i class="cert-mark ${type === 'client' ? 'client' : ''}">${svg(type === 'client' ? 'users' : 'shield')}</i><div><strong title="${esc(cert.name)}">${esc(cert.name)}</strong><small>ID #${esc(cert.id)} · ${esc((cert.sans || []).length ? `${cert.sans?.length} 个 SAN` : '无 SAN')}</small></div></div></td><td><span class="type-pill ${type}">${type === 'server' ? '服务器' : '客户端'}</span></td><td><span class="key-pill">${esc(cert.key_type || 'RSA')}</span></td><td><div class="date-cell"><strong>${esc(date(cert.expires_at))}</strong><small>签发于 ${esc(date(cert.created_at))}</small></div></td><td><span class="status-pill ${statusClass}"><i>●</i>${statusText}</span></td><td><div class="row-actions"><button class="row-action" data-action="detail" data-id="${esc(cert.id)}" title="查看详情" aria-label="查看 ${esc(cert.name)} 详情">${svg('eye')}</button><a class="row-action" data-auth-download="true" href="${API}/certificates/${encodeURIComponent(certId(cert))}/download" title="下载 ZIP" aria-label="下载 ${esc(cert.name)} ZIP">${svg('download')}</a></div></td></tr>`;
   }).join('');
 }
 function renderCA(): void {
@@ -155,13 +184,90 @@ function renderActivity(): void {
 function setConnected(connected: boolean): void { state.service = connected; el<HTMLElement>('#connection-dot').className = `connection-dot${connected ? '' : ' offline'}`; el<HTMLElement>('#connection-text').textContent = connected ? '服务在线' : '服务未连接'; }
 function toast(message: string, kind = ''): void { const region = el<HTMLElement>('#toast-region'); region.innerHTML = `<div class="toast ${kind}">${esc(message)}</div>`; if (toastTimer) clearTimeout(toastTimer); toastTimer = setTimeout(() => { region.innerHTML = ''; }, 4200); }
 
+const roleName = (user: User | null): string => user?.role === 'admin' ? '管理员' : user?.role === 'agent' ? `代理商${user.agent_name || user.agent?.name ? ` · ${user.agent_name || user.agent?.name}` : ''}` : '本地工作区';
+function renderIdentity(): void {
+  const user = state.auth.user;
+  el<HTMLElement>('#profile-name').textContent = user?.display_name || user?.username || '本地工作区';
+  el<HTMLElement>('#profile-role').textContent = state.auth.authenticated ? roleName(user) : '无远程连接';
+  el<HTMLElement>('#profile-avatar').textContent = initials(user?.display_name || user?.username || 'CT');
+  const logout = el<HTMLButtonElement>('#logout-button'); logout.hidden = !state.auth.authenticated;
+  const admin = user?.role === 'admin';
+  all<HTMLElement>('.admin-only').forEach((item) => { item.hidden = !admin; });
+  el<HTMLElement>('#admin-section').hidden = !admin;
+  const caAction = document.querySelector<HTMLElement>('[data-action="init-ca"]');
+  if (caAction) caAction.hidden = !admin;
+  const own = user?.role === 'agent';
+  el<HTMLElement>('#cert-nav-label').textContent = own ? '我的证书' : '证书';
+  el<HTMLElement>('#applications-title').textContent = own ? '我的应用' : '应用登记';
+  el<HTMLElement>('#applications-caption').textContent = own ? '当前代理商名下的应用与容器' : '追踪证书归属的应用与容器';
+}
+function showLogin(show: boolean): void { const gate = el<HTMLElement>('#auth-gate'); gate.hidden = !show; if (show) setTimeout(() => el<HTMLInputElement>('#login-username')?.focus(), 0); }
+function expireSession(): void {
+  sessionStorage.removeItem(TOKEN_KEY); localStorage.removeItem(TOKEN_KEY); state.auth.token = null; state.auth.user = null; state.auth.authenticated = false; state.auth.enabled = true; state.certificates = []; state.registrations = []; state.agents = []; state.accounts = []; renderIdentity(); renderMetrics(); renderCerts(); renderRegistrations(); showLogin(true); toast('登录已失效，请重新登录', 'error');
+}
+async function bootstrapAuth(): Promise<void> {
+  const saved = sessionStorage.getItem(TOKEN_KEY);
+  if (saved) state.auth.token = saved;
+  try {
+    const payload = await request<unknown>('/auth/me');
+    const user = userFromPayload(payload);
+    if (user) { state.auth.user = user; state.auth.authenticated = true; state.auth.enabled = true; }
+    else { state.auth.enabled = false; }
+  } catch (error) {
+    const status = error instanceof ApiError ? error.status : 0;
+    if (status === 401) {
+      // A legacy deployment may still authenticate the browser with HTTP Basic
+      // while it has no session endpoints. Probe a protected resource before
+      // deciding that the new login gate is required.
+      try { await request('/certificates'); state.auth.enabled = false; state.auth.authenticated = false; }
+      catch { state.auth.enabled = true; state.auth.authenticated = false; showLogin(true); }
+    }
+    else { state.auth.enabled = false; state.auth.authenticated = false; }
+  } finally { state.auth.loading = false; renderIdentity(); }
+}
+async function login(username: string, password: string): Promise<void> {
+  const payload = await request<unknown>('/auth/login', { method: 'POST', body: JSON.stringify({ username, password }) });
+  const token = normalizeToken(payload);
+  if (!token) throw new Error('登录响应缺少 token');
+  state.auth.token = token; sessionStorage.setItem(TOKEN_KEY, token);
+  state.auth.user = userFromPayload(payload);
+  if (!state.auth.user) state.auth.user = userFromPayload(await request<unknown>('/auth/me'));
+  state.auth.authenticated = true; state.auth.enabled = true; showLogin(false); renderIdentity(); await loadData();
+}
+async function logout(): Promise<void> {
+  try { if (state.auth.token) await request('/auth/logout', { method: 'POST', body: JSON.stringify({}) }); } catch { /* session cleanup remains local */ }
+  sessionStorage.removeItem(TOKEN_KEY); localStorage.removeItem(TOKEN_KEY); state.auth.token = null; state.auth.user = null; state.auth.authenticated = false; state.certificates = []; state.registrations = []; state.agents = []; state.accounts = []; renderIdentity(); renderMetrics(); renderCerts(); renderRegistrations(); if (state.auth.enabled) showLogin(true); else toast('已退出登录', 'ok');
+}
+function renderAdmin(): void {
+  if (state.auth.user?.role !== 'admin') return;
+  const agents = el<HTMLElement>('#agent-list');
+  agents.innerHTML = state.errors.agents ? `<div class="no-data">代理商数据暂不可用：${esc(state.errors.agents)}</div>` : state.agents.length ? state.agents.map((agent) => `<div class="admin-item"><div><strong>${esc(agent.name)}</strong><small>${esc(agent.status || 'active')} · ${esc((agent as Agent & { users?: number }).users ?? 0)} 个账户</small></div><span>${esc((agent as Agent & { certificates?: number }).certificates ?? 0)} 张证书 <button class="row-action admin-toggle" data-action="toggle-agent" data-id="${esc(agent.id)}" data-status="${esc(agent.status || 'active')}" aria-label="${agent.status === 'disabled' ? '启用' : '停用'} ${esc(agent.name)}">${agent.status === 'disabled' ? '启用' : '停用'}</button></span></div>`).join('') : '<div class="no-data">暂无代理商</div>';
+  const accounts = el<HTMLElement>('#account-list');
+  accounts.innerHTML = state.errors.agents ? '<div class="no-data">账户数据暂不可用</div>' : state.accounts.length ? state.accounts.map((account) => `<div class="admin-item"><div><strong>${esc(account.username)}</strong><small>${esc(roleName(account))}</small></div><span>${esc(account.status === 'disabled' ? '停用' : '启用')} <button class="row-action admin-toggle" data-action="toggle-account" data-id="${esc(account.id)}" data-status="${esc(account.status || 'active')}" aria-label="${account.status === 'disabled' ? '启用' : '停用'} ${esc(account.username)}">${account.status === 'disabled' ? '启用' : '停用'}</button></span></div>`).join('') : '<div class="no-data">暂无账户</div>';
+}
+function openAdminForm(kind: 'agent' | 'account'): void {
+  const agent = kind === 'agent';
+  openDrawer(`<div class="drawer-header"><div><h2 id="drawer-title">${agent ? '新增代理商' : '新增代理商账户'}</h2><p>由服务端校验管理员权限并保存归属。</p></div><button class="close-button" data-action="close" aria-label="关闭">${svg('close')}</button></div><form id="${agent ? 'agent-form' : 'account-form'}" class="drawer-body"><label class="form-label" for="admin-name">${agent ? '代理商名称' : '用户名'}</label><input class="form-control" id="admin-name" name="name" required maxlength="128" pattern="[A-Za-z0-9_.@-]+" />${agent ? '' : '<label class="form-label" for="admin-password">初始密码</label><input class="form-control" id="admin-password" name="password" type="password" minlength="8" required /><label class="form-label" for="admin-agent-id">代理商 ID</label><input class="form-control" id="admin-agent-id" name="agent_id" type="number" min="1" required />'}<div class="drawer-footer"><button type="button" class="ghost-button" data-action="close">取消</button><button type="submit" class="primary-button">保存</button></div></form>`);
+}
+async function downloadWithAuth(anchor: HTMLAnchorElement): Promise<void> {
+  const response = await fetch(anchor.href, { headers: { ...authHeaders() } });
+  if (!response.ok) { if (response.status === 401) expireSession(); throw new Error('下载失败'); }
+  const disposition = response.headers.get('content-disposition') || '';
+  const encodedName = disposition.match(/filename\*=UTF-8''([^;]+)/i)?.[1];
+  const plainName = disposition.match(/filename="?([^";]+)"?/i)?.[1];
+  const filename = encodedName ? decodeURIComponent(encodedName) : plainName || anchor.download || anchor.href.split('/').pop() || 'download';
+  const blob = await response.blob(); const url = URL.createObjectURL(blob); const link = document.createElement('a'); link.href = url; link.download = filename; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
 async function loadData(): Promise<void> {
-  const results = await Promise.allSettled([
+  const requests: Promise<unknown>[] = [
     request<{ items?: Certificate[] }>('/certificates'),
     request<{ items?: Registration[] }>('/registrations'),
     request<CAStatus>('/ca'),
-  ]);
-  const [certResult, registrationResult, caResult] = results;
+  ];
+  if (state.auth.user?.role === 'admin') requests.push(request<unknown>('/agents'), request<unknown>('/users'));
+  const results = await Promise.allSettled(requests);
+  const [certResult, registrationResult, caResult, agentsResult, accountsResult] = results;
   const message = (reason: unknown): string => reason instanceof Error ? reason.message : String(reason);
   state.errors = {
     certificates: certResult.status === 'rejected' ? message(certResult.reason) : null,
@@ -169,25 +275,30 @@ async function loadData(): Promise<void> {
     ca: caResult.status === 'rejected' ? message(caResult.reason) : null,
   };
   if (certResult.status === 'fulfilled') {
-    const payload = certResult.value;
+    const payload = certResult.value as { items?: Certificate[] } | Certificate[];
     state.certificates = Array.isArray(payload) ? payload : payload.items || [];
   }
   if (registrationResult.status === 'fulfilled') {
-    const payload = registrationResult.value;
+    const payload = registrationResult.value as { items?: Registration[] } | Registration[];
     state.registrations = Array.isArray(payload) ? payload : payload.items || [];
   }
-  if (caResult.status === 'fulfilled') state.ca = caResult.value;
+  if (caResult.status === 'fulfilled') state.ca = caResult.value as CAStatus;
+  if (agentsResult?.status === 'fulfilled') state.agents = listPayload<Agent>(agentsResult.value as Agent[] | { items?: Agent[]; data?: Agent[] });
+  if (accountsResult?.status === 'fulfilled') state.accounts = listPayload<User>(accountsResult.value as User[] | { items?: User[]; data?: User[] });
+  if (state.auth.user?.role === 'admin') state.errors.agents = agentsResult?.status === 'rejected' ? message(agentsResult.reason) : accountsResult?.status === 'rejected' ? message(accountsResult.reason) : null;
   const errors = Object.entries(state.errors).filter(([, value]) => value).map(([name, value]) => `${name}: ${value}`);
   state.loadError = errors.length ? errors.join('；') : null;
   setConnected(!state.loadError);
   if (state.loadError) toast(`读取服务数据失败：${state.loadError}`, 'error');
-  renderMetrics(); renderCerts(); renderCA(); renderRegistrations(); renderActivity();
+  renderMetrics(); renderCerts(); renderCA(); renderRegistrations(); renderActivity(); renderAdmin(); renderIdentity();
 }
 
 function closeDrawer(): void { const overlay = el<HTMLElement>('#overlay'); overlay.classList.remove('open'); overlay.setAttribute('aria-hidden', 'true'); setTimeout(() => { if (!overlay.classList.contains('open')) { overlay.innerHTML = ''; lastFocused?.focus(); lastFocused = null; } }, 240); }
 function openDrawer(content: string): void { const overlay = el<HTMLElement>('#overlay'); lastFocused = document.activeElement instanceof HTMLElement ? document.activeElement : null; overlay.innerHTML = `<section class="drawer" role="dialog" aria-modal="true" aria-labelledby="drawer-title">${content}</section>`; overlay.classList.add('open'); overlay.setAttribute('aria-hidden', 'false'); overlay.querySelector<HTMLElement>('.close-button, input, button, a')?.focus(); }
 function openGenerate(): void {
-  openDrawer(`<div class="drawer-header"><div><h2 id="drawer-title">生成证书</h2><p>使用本地 CA 为应用签发新证书</p></div><button class="close-button" data-action="close" aria-label="关闭">${svg('close')}</button></div><form id="issue-form" class="drawer-body"><div class="form-section"><h3 class="form-section-title">证书用途</h3><div class="radio-grid"><label class="radio-card"><input type="radio" name="type" value="server" checked /><strong>服务器证书</strong><span>域名 / IP 服务</span></label><label class="radio-card"><input type="radio" name="type" value="client" /><strong>客户端证书</strong><span>应用身份认证</span></label></div><label class="form-label" for="issue-name">名称 / Common Name</label><input class="form-control" id="issue-name" name="name" required pattern="[A-Za-z0-9._\\-]{1,128}" placeholder="例如 api.example.dev" /><p class="form-hint">名称会作为输出目录和证书 CN，仅支持字母、数字、点、下划线和短横线。</p><label class="form-label" for="issue-sans">SAN（可选）</label><textarea class="form-control" id="issue-sans" name="sans" placeholder="每行或逗号分隔，例如：\napi.example.dev\n10.0.0.10"></textarea><p class="form-hint">服务器证书可添加多个域名或 IP；客户端证书无需填写。</p></div><div class="form-section"><h3 class="form-section-title">有效期与密钥</h3><div class="form-row"><div><label class="form-label" for="issue-days">有效期（天）</label><input class="form-control" id="issue-days" name="days" type="number" min="1" max="7300" value="398" /></div><div><label class="form-label" for="issue-key">密钥类型</label><select class="form-control" id="issue-key" name="key_type"><option value="both">RSA + EC</option><option value="rsa">RSA 2048</option><option value="ec">EC P-256</option></select></div></div><label class="form-label" for="issue-rootpass">根 CA 密码（可选）</label><input class="form-control" id="issue-rootpass" name="rootpass" type="password" autocomplete="new-password" placeholder="未设置 ROOTPASS 时填写" /></div><div class="drawer-footer"><button type="button" class="ghost-button" data-action="close">取消</button><button type="submit" class="primary-button" id="issue-submit">${svg('certificate')}生成并登记</button></div></form>`);
+  const admin = state.auth.user?.role === 'admin';
+  const rootpass = admin ? '<label class="form-label" for="issue-rootpass">根 CA 密码（可选）</label><input class="form-control" id="issue-rootpass" name="rootpass" type="password" autocomplete="new-password" placeholder="未设置 ROOTPASS 时填写" />' : '';
+  openDrawer(`<div class="drawer-header"><div><h2 id="drawer-title">生成证书</h2><p>使用本地 CA 为应用签发新证书</p></div><button class="close-button" data-action="close" aria-label="关闭">${svg('close')}</button></div><form id="issue-form" class="drawer-body"><div class="form-section"><h3 class="form-section-title">证书用途</h3><div class="radio-grid"><label class="radio-card"><input type="radio" name="type" value="server" checked /><strong>服务器证书</strong><span>域名 / IP 服务</span></label><label class="radio-card"><input type="radio" name="type" value="client" /><strong>客户端证书</strong><span>应用身份认证</span></label></div><label class="form-label" for="issue-name">名称 / Common Name</label><input class="form-control" id="issue-name" name="name" required pattern="[A-Za-z0-9._\\-]{1,128}" placeholder="例如 api.example.dev" /><p class="form-hint">名称会作为证书 CN，仅支持字母、数字、点、下划线和短横线。</p><label class="form-label" for="issue-sans">SAN（可选）</label><textarea class="form-control" id="issue-sans" name="sans" placeholder="每行或逗号分隔，例如：\napi.example.dev\n10.0.0.10"></textarea><p class="form-hint">服务器证书可添加多个域名或 IP；客户端证书无需填写。</p></div><div class="form-section"><h3 class="form-section-title">有效期与密钥</h3><div class="form-row"><div><label class="form-label" for="issue-days">有效期（天）</label><input class="form-control" id="issue-days" name="days" type="number" min="1" max="7300" value="398" /></div><div><label class="form-label" for="issue-key">密钥类型</label><select class="form-control" id="issue-key" name="key_type"><option value="both">RSA + EC</option><option value="rsa">RSA 2048</option><option value="ec">EC P-256</option></select></div></div>${rootpass}</div><div class="drawer-footer"><button type="button" class="ghost-button" data-action="close">取消</button><button type="submit" class="primary-button" id="issue-submit">${svg('certificate')}生成并登记</button></div></form>`);
   el<HTMLInputElement>('#issue-name').focus();
 }
 function openRegistration(): void {
@@ -199,7 +310,7 @@ function detailMarkup(cert: Certificate): string {
   const files = cert.files || [];
   const left = daysLeft(cert);
   const status = left === null ? '未知' : left < 0 ? '已过期' : '有效';
-  return `<div class="drawer-header"><div><h2 id="drawer-title">证书详情</h2><p>签发记录与文件清单</p></div><button class="close-button" data-action="close" aria-label="关闭">${svg('close')}</button></div><div class="drawer-body drawer-detail"><div class="detail-hero"><i class="cert-mark ${type === 'client' ? 'client' : ''}">${svg(type === 'client' ? 'users' : 'shield')}</i><div><h3>${esc(cert.name)}</h3><p>${type === 'server' ? '服务器证书' : '客户端证书'} · ID #${esc(cert.id)}</p></div></div><div class="detail-grid"><div class="detail-item"><label>密钥类型</label><strong>${esc((cert.key_type || 'RSA').toUpperCase())}</strong></div><div class="detail-item"><label>状态</label><strong>${status}</strong></div><div class="detail-item"><label>签发时间</label><strong>${esc(dateTime(cert.created_at))}</strong></div><div class="detail-item"><label>到期时间</label><strong>${esc(dateTime(cert.expires_at))}</strong></div></div><div class="detail-block"><h4>SAN / 域名</h4><div class="san-list">${(cert.sans || []).length ? (cert.sans || []).map((san) => `<span class="san">${esc(san)}</span>`).join('') : '<span class="form-hint">无 SAN</span>'}</div></div><div class="detail-block"><h4>文件</h4><div class="file-list">${files.length ? files.map((file) => `<div class="file-item"><span>${esc(file)}</span><a href="${API}/certificates/${encodeURIComponent(certId(cert))}/files/${encodeURIComponent(file)}" download>下载</a></div>`).join('') : '<span class="form-hint">文件列表不可用</span>'}</div></div></div><div class="drawer-footer"><a class="primary-button" href="${API}/certificates/${encodeURIComponent(certId(cert))}/download" download>${svg('download')}下载 ZIP</a></div>`;
+  return `<div class="drawer-header"><div><h2 id="drawer-title">证书详情</h2><p>签发记录与文件清单</p></div><button class="close-button" data-action="close" aria-label="关闭">${svg('close')}</button></div><div class="drawer-body drawer-detail"><div class="detail-hero"><i class="cert-mark ${type === 'client' ? 'client' : ''}">${svg(type === 'client' ? 'users' : 'shield')}</i><div><h3>${esc(cert.name)}</h3><p>${type === 'server' ? '服务器证书' : '客户端证书'} · ID #${esc(cert.id)}</p></div></div><div class="detail-grid"><div class="detail-item"><label>密钥类型</label><strong>${esc((cert.key_type || 'RSA').toUpperCase())}</strong></div><div class="detail-item"><label>状态</label><strong>${status}</strong></div><div class="detail-item"><label>签发时间</label><strong>${esc(dateTime(cert.created_at))}</strong></div><div class="detail-item"><label>到期时间</label><strong>${esc(dateTime(cert.expires_at))}</strong></div></div><div class="detail-block"><h4>SAN / 域名</h4><div class="san-list">${(cert.sans || []).length ? (cert.sans || []).map((san) => `<span class="san">${esc(san)}</span>`).join('') : '<span class="form-hint">无 SAN</span>'}</div></div><div class="detail-block"><h4>文件</h4><div class="file-list">${files.length ? files.map((file) => `<div class="file-item"><span>${esc(file)}</span><a data-auth-download="true" href="${API}/certificates/${encodeURIComponent(certId(cert))}/files/${encodeURIComponent(file)}" download>下载</a></div>`).join('') : '<span class="form-hint">文件列表不可用</span>'}</div></div></div><div class="drawer-footer"><a class="primary-button" data-auth-download="true" href="${API}/certificates/${encodeURIComponent(certId(cert))}/download" download>${svg('download')}下载 ZIP</a></div>`;
 }
 
 async function openDetail(cert: Certificate): Promise<void> {
@@ -225,6 +336,8 @@ async function handleSubmit(form: HTMLFormElement): Promise<void> {
     if (form.id === 'issue-form') {
       const type = String(data.get('type') || 'server') as CertType; const sans = String(data.get('sans') || '').split(/[\n,\s]+/).map((value) => value.trim()).filter(Boolean); const payload = { type, name: String(data.get('name') || '').trim(), sans, days: Number(data.get('days') || 398), key_type: String(data.get('key_type') || 'both'), rootpass: String(data.get('rootpass') || '') || undefined }; await request<Certificate>('/certificates', { method: 'POST', body: JSON.stringify(payload) }); closeDrawer(); toast('证书已生成并登记', 'ok'); await loadData();
     } else if (form.id === 'registration-form') { await request<Registration>('/registrations', { method: 'POST', body: JSON.stringify({ name: String(data.get('name') || '').trim(), owner: String(data.get('owner') || '').trim(), notes: String(data.get('notes') || '').trim() }) }); closeDrawer(); toast('应用登记已保存', 'ok'); await loadData();
+    } else if (form.id === 'agent-form') { await request('/agents', { method: 'POST', body: JSON.stringify({ name: String(data.get('name') || '').trim() }) }); closeDrawer(); toast('代理商已创建', 'ok'); await loadData();
+    } else if (form.id === 'account-form') { await request('/users', { method: 'POST', body: JSON.stringify({ username: String(data.get('name') || '').trim(), password: String(data.get('password') || ''), role: 'agent', agent_id: Number(data.get('agent_id')) }) }); closeDrawer(); toast('代理商账户已创建', 'ok'); await loadData();
     } else { await request<CAStatus>('/ca/initialize', { method: 'POST', body: JSON.stringify({ rootpass: String(data.get('rootpass') || '') }) }); closeDrawer(); toast('根 CA 初始化完成', 'ok'); await loadData(); }
   } catch (error) { toast(`操作失败：${(error as Error).message}`, 'error'); if (submit) submit.disabled = false; }
 }
@@ -243,10 +356,15 @@ function navigate(button: HTMLButtonElement): void {
 function bindEvents(): void {
   document.addEventListener('click', (event) => {
     const target = event.target as HTMLElement;
+    const authDownload = target.closest<HTMLAnchorElement>('a[data-auth-download]');
+    if (authDownload) { event.preventDefault(); void downloadWithAuth(authDownload).catch((error) => toast((error as Error).message, 'error')); return; }
     const action = target.closest<HTMLElement>('[data-action]')?.dataset.action;
     if (action === 'generate') openGenerate();
     else if (action === 'register') openRegistration();
     else if (action === 'init-ca') openCAInit();
+    else if (action === 'create-agent') openAdminForm('agent');
+    else if (action === 'create-account') openAdminForm('account');
+    else if (action === 'toggle-agent' || action === 'toggle-account') { const id = target.closest<HTMLElement>('[data-id]')?.dataset.id; const status = target.closest<HTMLElement>('[data-id]')?.dataset.status; if (id) void request(action === 'toggle-agent' ? `/agents/${encodeURIComponent(id)}` : `/users/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify({ status: status === 'disabled' ? 'active' : 'disabled' }) }).then(() => { toast(status === 'disabled' ? '已启用' : '已停用', 'ok'); return loadData(); }).catch((error) => toast(`操作失败：${(error as Error).message}`, 'error')); }
     else if (action === 'close') closeDrawer();
     else if (action === 'detail') {
       const row = target.closest<HTMLElement>('[data-id]');
@@ -269,6 +387,7 @@ function bindEvents(): void {
       } else if (nav) navigate(nav);
     }
   });
+  el<HTMLButtonElement>('#logout-button').addEventListener('click', () => { void logout(); });
   document.addEventListener('input', (event) => { if ((event.target as HTMLElement).id === 'search-input') { state.query = (event.target as HTMLInputElement).value.trim(); renderCerts(); } });
   document.addEventListener('change', (event) => {
     const target = event.target as HTMLInputElement;
@@ -279,10 +398,10 @@ function bindEvents(): void {
       if (client) sans.value = '';
     }
   });
-  document.addEventListener('submit', (event) => { const form = event.target as HTMLFormElement; if (['issue-form', 'registration-form', 'ca-form'].includes(form.id)) { event.preventDefault(); void handleSubmit(form); } });
+  document.addEventListener('submit', (event) => { const form = event.target as HTMLFormElement; if (form.id === 'login-form') { event.preventDefault(); const submit = form.querySelector<HTMLButtonElement>('button[type="submit"]'); if (submit) submit.disabled = true; el<HTMLElement>('#login-error').textContent = ''; void login(String(new FormData(form).get('username') || '').trim(), String(new FormData(form).get('password') || '')).catch((error) => { el<HTMLElement>('#login-error').textContent = `登录失败：${(error as Error).message}`; if (submit) submit.disabled = false; }); } else if (['issue-form', 'registration-form', 'ca-form', 'agent-form', 'account-form'].includes(form.id)) { event.preventDefault(); void handleSubmit(form); } });
   el<HTMLElement>('#overlay').addEventListener('click', (event) => { if (event.target === el<HTMLElement>('#overlay')) closeDrawer(); });
   document.addEventListener('keydown', (event) => { if (event.key === 'Escape') closeDrawer(); });
 }
 
-function mount(): void { el<HTMLElement>('#app').innerHTML = shell(); bindEvents(); void loadData(); }
+async function mount(): Promise<void> { el<HTMLElement>('#app').innerHTML = shell(); bindEvents(); await bootstrapAuth(); if (!state.auth.enabled || state.auth.authenticated) await loadData(); }
 mount();

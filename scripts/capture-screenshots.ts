@@ -50,13 +50,15 @@ let browser: Awaited<ReturnType<typeof chromium.launch>> | undefined;
 try {
   await Promise.all([
     cp(join(repoRoot, 'ca.cnf'), join(fixtureRoot, 'ca.cnf')),
+    cp(join(repoRoot, 'server.py'), join(fixtureRoot, 'server.py')),
     cp(join(repoRoot, 'flush.sh'), join(fixtureRoot, 'flush.sh')),
     cp(join(repoRoot, 'gen_root_cert.sh'), join(fixtureRoot, 'gen_root_cert.sh')),
     cp(join(repoRoot, 'gen_server_cert.sh'), join(fixtureRoot, 'gen_server_cert.sh')),
     cp(join(repoRoot, 'gen_client_cert.sh'), join(fixtureRoot, 'gen_client_cert.sh')),
+    cp(join(repoRoot, 'scripts'), join(fixtureRoot, 'scripts'), { recursive: true }),
   ]);
   await writeFile(join(fixtureRoot, '.fixture'), 'screenshots\n');
-  serverProcess = Bun.spawn(['python3', fixtureServer, '--root', fixtureRoot, '--web-dir', join(repoRoot, 'web')], {
+  serverProcess = Bun.spawn(['python3', fixtureServer, '--root', fixtureRoot, '--web-dir', join(repoRoot, 'web'), '--allow-anonymous'], {
     cwd: repoRoot,
     env: { ...process.env, ROOTPASS: rootPassword, WEB_USERNAME: '', WEB_PASSWORD: '' },
     stdout: 'pipe',

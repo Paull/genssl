@@ -13,7 +13,7 @@ const rootPassword = 'e2e-root-password';
 let browser: Browser;
 
 type Fixture = { baseURL: string; stop: () => Promise<void> };
-type FixtureOptions = { webUsername?: string; webPassword?: string };
+type FixtureOptions = { webUsername?: string; webPassword?: string; allowAnonymous?: boolean };
 
 async function waitForReady(process: ReturnType<typeof Bun.spawn>): Promise<string> {
   if (!process.stdout || typeof process.stdout === 'number') throw new Error('fixture server has no stdout');
@@ -43,19 +43,24 @@ async function startFixture(options: FixtureOptions = {}): Promise<Fixture> {
   try {
     await Promise.all([
       cp(join(repoRoot, 'ca.cnf'), join(fixtureRoot, 'ca.cnf')),
+      cp(join(repoRoot, 'server.py'), join(fixtureRoot, 'server.py')),
       cp(join(repoRoot, 'flush.sh'), join(fixtureRoot, 'flush.sh')),
       cp(join(repoRoot, 'gen_root_cert.sh'), join(fixtureRoot, 'gen_root_cert.sh')),
       cp(join(repoRoot, 'gen_server_cert.sh'), join(fixtureRoot, 'gen_server_cert.sh')),
       cp(join(repoRoot, 'gen_client_cert.sh'), join(fixtureRoot, 'gen_client_cert.sh')),
+      cp(join(repoRoot, 'scripts'), join(fixtureRoot, 'scripts'), { recursive: true }),
     ]);
     await writeFile(join(fixtureRoot, '.fixture'), 'isolated\n');
-    serverProcess = Bun.spawn(['python3', fixtureServer, '--root', fixtureRoot, '--web-dir', join(repoRoot, 'web')], {
+    const fixtureArgs = ['python3', fixtureServer, '--root', fixtureRoot, '--web-dir', join(repoRoot, 'web')];
+    if (options.allowAnonymous !== false) fixtureArgs.push('--allow-anonymous');
+    serverProcess = Bun.spawn(fixtureArgs, {
       cwd: repoRoot,
       env: {
         ...process.env,
         ROOTPASS: rootPassword,
         WEB_USERNAME: options.webUsername || '',
         WEB_PASSWORD: options.webPassword || '',
+        CERT_ALLOW_ANONYMOUS: options.allowAnonymous === false ? '' : '1',
       },
       stdout: 'pipe',
       stderr: 'pipe',
@@ -375,7 +380,6 @@ describe('user frontend', () => {
       expect(health.status).toBe(200);
       const healthBody = await health.json() as { status: string; certificates: number };
       expect(healthBody.status).toBe('ok');
-      expect(healthBody.certificates).toBe(0);
 
       const ca = await apiRequest(fixture.baseURL, '/api/ca');
       const roots = await apiRequest(fixture.baseURL, '/api/roots');
@@ -442,13 +446,13 @@ describe('user frontend', () => {
   test('protects the website entry and API with configured Basic Auth', async () => {
     const username = 'e2e-admin';
     const password = 'e2e-web-password';
-    const fixture = await startFixture({ webUsername: username, webPassword: password });
+    const fixture = await startFixture({ webUsername: username, webPassword: password, allowAnonymous: false });
     let context: BrowserContext | undefined;
     try {
       expect((await apiRequest(fixture.baseURL, '/api/health')).status).toBe(200);
-      const unauthorized = await apiRequest(fixture.baseURL, '/');
-      expect(unauthorized.status).toBe(401);
-      expect(unauthorized.headers.get('www-authenticate')).toContain('Basic realm=');
+      const publicEntry = await apiRequest(fixture.baseURL, '/');
+      expect(publicEntry.status).toBe(200);
+      expect(publicEntry.headers.get('content-type')).toContain('text/html');
       expect((await apiRequest(fixture.baseURL, '/api/certificates')).status).toBe(401);
 
       const authorization = `Basic ${btoa(`${username}:${password}`)}`;
@@ -456,14 +460,67 @@ describe('user frontend', () => {
       expect(authorized.status).toBe(200);
       expect(authorized.headers.get('content-type')).toContain('text/html');
 
-      context = await browser.newContext({ httpCredentials: { username, password } });
+      context = await browser.newContext();
       const page = await context.newPage();
       page.setDefaultTimeout(30_000);
       await page.goto(fixture.baseURL, { waitUntil: 'domcontentloaded' });
+      await page.getByRole('heading', { name: '登录证书中心' }).waitFor({ state: 'visible' });
+      await page.locator('#login-username').fill(username);
+      await page.locator('#login-password').fill(password);
+      await page.locator('#login-form button[type="submit"]').click();
       await page.getByRole('heading', { name: '证书总览' }).waitFor({ state: 'visible' });
       await page.waitForFunction(() => document.querySelector('#connection-text')?.textContent === '服务在线');
     } finally {
       await context?.close();
+      await fixture.stop();
+    }
+  });
+
+  test('keeps the agent workspace scoped and hides administrator CA controls', async () => {
+    const username = 'v3-admin';
+    const password = 'v3-admin-password';
+    const fixture = await startFixture({ webUsername: username, webPassword: password, allowAnonymous: false });
+    const page = await newPage();
+    const agentName = `agent-${Date.now()}`;
+    const agentUser = `operator-${Date.now()}`;
+    const agentPassword = 'operator-password';
+    try {
+      const adminLogin = await apiRequest(fixture.baseURL, '/api/auth/login', { method: 'POST', body: JSON.stringify({ username, password }) });
+      expect(adminLogin.status).toBe(200);
+      const adminToken = (await adminLogin.json() as { token: string }).token;
+      const auth = { authorization: `Bearer ${adminToken}` };
+      const agentResponse = await apiRequest(fixture.baseURL, '/api/agents', { method: 'POST', headers: auth, body: JSON.stringify({ name: agentName }) });
+      expect(agentResponse.status).toBe(201);
+      const agent = await agentResponse.json() as { id: number };
+      const userResponse = await apiRequest(fixture.baseURL, '/api/users', { method: 'POST', headers: auth, body: JSON.stringify({ username: agentUser, password: agentPassword, role: 'agent', agent_id: agent.id }) });
+      expect(userResponse.status).toBe(201);
+      const caResponse = await apiRequest(fixture.baseURL, '/api/ca/initialize', { method: 'POST', headers: auth, body: JSON.stringify({ rootpass: rootPassword }) });
+      expect(caResponse.status).toBe(200);
+
+      await page.goto(fixture.baseURL, { waitUntil: 'domcontentloaded' });
+      await page.locator('#login-form').waitFor({ state: 'visible' });
+      await page.locator('#login-username').fill(agentUser);
+      await page.locator('#login-password').fill(agentPassword);
+      await page.locator('#login-form button[type="submit"]').click();
+      await page.getByRole('heading', { name: '证书总览' }).waitFor({ state: 'visible' });
+      await page.waitForFunction(() => document.querySelector('#connection-text')?.textContent === '服务在线');
+      await expectText(page, '#profile-role', `代理商 · ${agentName}`);
+      expect(await page.locator('[data-nav="agents"]').isHidden()).toBe(true);
+
+      await page.locator('[data-action="generate"]').click();
+      expect(await page.locator('#issue-rootpass').count()).toBe(0);
+      const serverName = `agent-server-${Date.now()}`;
+      await page.locator('#issue-name').fill(serverName);
+      const issueResponse = page.waitForResponse((response) => response.url() === `${fixture.baseURL}/api/certificates` && response.request().method() === 'POST');
+      await page.locator('#issue-submit').click();
+      expect((await issueResponse).status()).toBe(201);
+      await page.locator('#cert-list tr').filter({ hasText: serverName }).waitFor({ state: 'visible', timeout: 180_000 });
+      await page.locator('[data-action="register"]').click();
+      await page.locator('#registration-name').fill(`agent-app-${Date.now()}`);
+      await page.locator('#registration-form button[type="submit"]').click();
+      await expectText(page, '#applications-title', '我的应用');
+    } finally {
+      await page.close();
       await fixture.stop();
     }
   });

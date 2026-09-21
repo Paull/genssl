@@ -61,9 +61,11 @@ out/<domain>/rsa_<domain>.bundle.crt
 
 ## 在线管理 API
 
-项目现在提供单机在线管理界面的静态页面（`web/index.html`）和 REST API 文档（[docs/API.md](docs/API.md)）。启动 API 服务后，在浏览器打开服务根路径即可完成：
+项目现在提供单机在线管理界面的静态页面（`web/index.html`）和 REST API 文档（[docs/API.md](docs/API.md)）。v3 在同一个单机服务中增加管理员/代理商用户角色和证书归属隔离；第一版不包含费用、结算、多级代理商或技术 Agent。启动 API 服务后，在浏览器打开服务根路径即可完成：
 
 * 查看根 CA 和已签发证书；
+* 管理代理商和代理商账户（管理员）；
+* 按当前代理商隔离查看和下载证书；
 * 在线生成客户端或服务器证书（包括 SAN、有效期和 RSA、EC 或两者的密钥类型）；
 * 下载证书 ZIP 包或登记应用/容器归属。
 
@@ -71,6 +73,10 @@ out/<domain>/rsa_<domain>.bundle.crt
 
 ```text
 GET  /api/health
+POST /api/auth/login
+GET  /api/auth/me
+GET  /api/agents            # 管理员
+POST /api/agents            # 管理员
 GET  /api/ca                 # 也兼容 /api/roots
 POST /api/ca/initialize
 GET  /api/certificates
@@ -108,7 +114,7 @@ POST /api/registrations
 
 ![证书详情](docs/screenshots/certificate-detail.png)
 
-构建后的页面只依赖浏览器原生 JavaScript；在线服务面向单机/内网集中管控，支持 Basic Auth，暂不包含细粒度用户/角色、吊销和二级代理商功能。
+构建后的页面只依赖浏览器原生 JavaScript；在线服务面向单机/内网集中管控。静态入口保持可访问，API 通过管理员/代理商登录和 Bearer 会话保护；配置 `WEB_USERNAME` / `WEB_PASSWORD` 时仍兼容管理员 Basic Auth。证书吊销、自动续期和计费结算不在第一版范围内。
 
 ### 使用 Bun 构建界面
 
@@ -117,7 +123,7 @@ POST /api/registrations
 ```bash
 bun install                 # 安装 Bun 开发依赖（包括 E2E 浏览器客户端）
 bun run build               # 生成 web/app.js 和 web/styles.css
-ROOTPASS='change-me' bun run start
+CERT_ALLOW_ANONYMOUS=1 ROOTPASS='change-me' bun run start
 ```
 
 只调试前端时可运行 `bun run dev` 监听源码变化；需要同时管理前后端时使用下一节的 `bun run dev:start`。服务端默认按 `web/dist`、`dist`、`web` 的顺序查找静态页面；也可以通过 `--web-dir` 或 `CERT_WEB_DIR` 指定 Bun 的构建目录。静态资源支持 MIME 类型、浏览器 `HEAD` 探测和前端路由回退到 `index.html`。
@@ -137,10 +143,10 @@ bun run dev:logs       # 追踪两个进程的日志
 
 也可以使用等价的 Make 命令：`make dev-start`、`make dev-status`、`make dev-reload`、`make dev-restart`、`make dev-stop`、`make dev-logs`；并提供更短的 `make start`、`make status`、`make reload`、`make restart`、`make stop`、`make logs` 别名（`make dev` 等同于 `make dev-start`）。通过 `ROOTPASS`、`DEV_HOST`、`DEV_PORT` 可以设置根 CA 密码、监听地址和端口；例如 `ROOTPASS='change-me' DEV_PORT=18080 make dev-start`。
 
-启动服务（根 CA 密码通过环境变量提供；若未执行构建，请先运行 `bun run build`）：
+启动服务（根 CA 密码通过环境变量提供；本地无账号的临时调试需显式设置 `CERT_ALLOW_ANONYMOUS=1`；若未执行构建，请先运行 `bun run build`）：
 
 ```bash
-ROOTPASS='change-me' python3 server.py --host 0.0.0.0 --port 8080
+CERT_ALLOW_ANONYMOUS=1 ROOTPASS='change-me' python3 server.py --host 0.0.0.0 --port 8080
 ```
 
 首次运行后打开 <http://127.0.0.1:8080/>，点击“初始化根 CA”，或直接调用 `POST /api/ca/initialize`。服务会在 `out/` 下保存根证书、签发文件和 SQLite 登记库；`flush.sh` 可在停止服务后清空这些本地状态。
@@ -156,7 +162,7 @@ docker compose up --build -d
 docker compose ps
 ```
 
-访问 <http://127.0.0.1:8080/> 时使用 `WEB_USERNAME` / `WEB_PASSWORD` 登录；网站入口、静态资源、API 和证书下载都会要求 Basic Auth。只有 `/api/health` 保持公开，供 Docker 健康检查使用。服务正常后在界面中初始化根 CA。修改 `.env` 中的 `CERT_PORT` 可以更换宿主机端口。备份生产数据时停止服务并备份该 volume；不要删除它，否则会丢失根 CA 私钥和已签发证书。
+访问 <http://127.0.0.1:8080/> 后使用 `WEB_USERNAME` / `WEB_PASSWORD` 登录证书中心；静态入口公开，API 和证书下载需要 Bearer 会话，配置的 Basic Auth 仅作为管理员兼容入口。只有 `/api/health` 保持公开，供 Docker 健康检查使用。服务正常后在界面中初始化根 CA。修改 `.env` 中的 `CERT_PORT` 可以更换宿主机端口。升级前可运行 `python3 scripts/migrate_v3.py` 备份并执行数据库迁移；备份生产数据时停止服务并备份该 volume，不要删除它，否则会丢失根 CA 私钥和已签发证书。
 
 ### Bun E2E 测试
 

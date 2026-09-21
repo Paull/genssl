@@ -28,8 +28,9 @@ RUN apt-get update \
 WORKDIR /app
 COPY --from=frontend-build /build/web ./web
 COPY server.py ca.cnf flush.sh gen_root_cert.sh gen_server_cert.sh gen_client_cert.sh ./
+COPY scripts ./scripts
 
-RUN chmod 0755 ./*.sh server.py \
+RUN chmod 0755 ./*.sh server.py ./scripts/*.sh ./scripts/local_cert.py \
     && mkdir -p /app/out \
     && chown --recursive certmanager:certmanager /app
 
