@@ -88,7 +88,11 @@ POST /api/registrations
 
 ### 管理界面截图
 
-下面的截图来自隔离的 E2E 运行环境，展示了从首次进入到证书详情的主要管理界面。可以用 `bun run screenshots` 重新生成。
+下面的截图来自隔离的 v3 E2E 运行环境，覆盖登录、管理员代理商/账户管理、CA 初始化、证书和应用操作，以及代理商工作区。可以用 `bun run screenshots` 重新生成全部截图。
+
+#### 登录入口
+
+![登录证书中心](docs/screenshots/login.png)
 
 #### 证书总览（首次进入）
 
@@ -113,6 +117,30 @@ POST /api/registrations
 #### 证书详情和文件下载
 
 ![证书详情](docs/screenshots/certificate-detail.png)
+
+#### 新增代理商
+
+![新增代理商](docs/screenshots/agent-create.png)
+
+#### 新增代理商账户
+
+![新增代理商账户](docs/screenshots/account-create.png)
+
+#### 管理员代理商与账户工作区
+
+![管理员代理商与账户工作区](docs/screenshots/agent-management.png)
+
+#### 代理商工作区
+
+![代理商工作区](docs/screenshots/agent-workspace.png)
+
+#### 代理商生成证书
+
+![代理商生成证书](docs/screenshots/agent-certificate-generation.png)
+
+#### 代理商工作区（已有证书和应用）
+
+![代理商工作区已有证书和应用](docs/screenshots/agent-workspace-managed.png)
 
 构建后的页面只依赖浏览器原生 JavaScript；在线服务面向单机/内网集中管控。静态入口保持可访问，API 通过管理员/代理商登录和 Bearer 会话保护；配置 `WEB_USERNAME` / `WEB_PASSWORD` 时仍兼容管理员 Basic Auth。证书吊销、自动续期和计费结算不在第一版范围内。
 
