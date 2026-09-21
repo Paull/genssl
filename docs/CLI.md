@@ -57,3 +57,9 @@ usage errors exit 2, authentication failures 3, missing records 4, network
 errors 5, API errors 6, authorization failures 7, and local output errors 8.
 Secrets are redacted from JSON and text output. `logout` invalidates the
 server session and removes the local token cache.
+
+The administrator compatibility wrappers `gen_root_cert.sh`,
+`gen_server_cert.sh`, and `gen_client_cert.sh` continue to publish the
+traditional `out/<name>/` links and timestamped snapshots. The wrapper name
+`root` is reserved because it conflicts with the CA root filenames; use the
+API/`certctl` path when a leaf certificate must have the Common Name `root`.

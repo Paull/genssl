@@ -47,6 +47,8 @@
 
 `GET /api/certificates/{id}/download` 下载该证书的 ZIP 包。若实现支持按格式下载，可传 `?format=crt|key|p12|pem|bundle`。
 
+格式下载始终按证书记录的名称选择 leaf artifact，不会返回目录中的 CA root 副本；`name=root` 由 API 使用独立的 root-copy 文件名以避免覆盖 CA 根证书。
+
 `GET /api/certificates/{id}/files/{filename}` 下载 ZIP 包中的单个文件。`filename` 必须来自证书详情返回的文件清单，服务端不得接受任意路径。
 
 ## 应用登记

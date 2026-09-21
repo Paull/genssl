@@ -31,7 +31,10 @@ else
 fi
 for algorithm in rsa ec; do
   file="$target/${algorithm}_$name"
-  if [[ "$algorithm" == rsa ]]; then
+  legacy_key="${CERT_LEGACY_DIR:-}/${algorithm}_${name}.key"
+  if [[ -n "${CERT_LEGACY_DIR:-}" && -f "$legacy_key" ]]; then
+    cp "$legacy_key" "$file.key"
+  elif [[ "$algorithm" == rsa ]]; then
     openssl genrsa -traditional -out "$file.key" 2048
   else
     openssl ecparam -genkey -name prime256v1 -out "$file.key"
@@ -53,6 +56,10 @@ for algorithm in rsa ec; do
   openssl pkcs12 -export -legacy -in "$file.crt" -inkey "$file.key" -out "${file}_legacy.p12" -passout pass:1234
   openssl pkcs12 -in "$file.p12" -out "$file.pem" -passin pass:1234 -passout pass:1234
   cat "$file.crt" "out/${algorithm}_root.crt" > "$file.bundle.crt"
-  cp "out/${algorithm}_root.crt" "$target/${algorithm}_root.crt"
+  # A leaf named ``root`` would collide with the CA root artifact. Keep the
+  # public leaf name for the certificate record and use a distinct root copy.
+  root_copy="$target/${algorithm}_root.crt"
+  [[ "$name" == root ]] && root_copy="$target/${algorithm}_ca_root.crt"
+  cp "out/${algorithm}_root.crt" "$root_copy"
 done
 printf '%s\n' "$target"

@@ -255,8 +255,13 @@ class CertificateStore:
             fields.append("status=?"); params.append(payload["status"])
         if fields:
             fields.append("updated_at=?"); params.append(_utc_now()); params.append(agent_id)
-            with self.db_lock, self.db:
-                self.db.execute(f"UPDATE agents SET {', '.join(fields)} WHERE id=?", params)
+            try:
+                with self.db_lock, self.db:
+                    self.db.execute(f"UPDATE agents SET {', '.join(fields)} WHERE id=?", params)
+            except sqlite3.IntegrityError as exc:
+                err = CertificateError("agent already exists")
+                err.status = HTTPStatus.CONFLICT
+                raise err from exc
             if payload.get("status") == "disabled":
                 with self.db_lock, self.db:
                     self.db.execute("DELETE FROM sessions WHERE user_id IN (SELECT id FROM users WHERE agent_id=?)", (agent_id,))
@@ -896,7 +901,7 @@ class APIHandler(BaseHTTPRequestHandler):
     def do_OPTIONS(self) -> None:
         self.send_response(HTTPStatus.NO_CONTENT)
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "GET,POST,PATCH,OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
         self.end_headers()
 
@@ -1022,9 +1027,17 @@ class APIHandler(BaseHTTPRequestHandler):
                         self._send_json(404, {"error": "certificate not found"})
                         return
                     suffix = ".bundle.crt" if requested_format == "bundle" else f".{requested_format}"
-                    candidates = [name for name in record["files"] if name.endswith(suffix) and name.startswith("rsa_")]
+                    # Select the leaf artifact by the recorded certificate name.
+                    # Root copies live beside it and must never satisfy a leaf
+                    # format download, especially for names such as z.example
+                    # or the valid API name root.
+                    candidates = []
+                    for algorithm in ("rsa", "ec"):
+                        exact = f"{algorithm}_{record['name']}{suffix}"
+                        if exact in record["files"]:
+                            candidates.append(exact)
                     if not candidates:
-                        candidates = [name for name in record["files"] if name.endswith(suffix)]
+                        candidates = [name for name in record["files"] if name.startswith((f"rsa_{record['name']}.", f"ec_{record['name']}.")) and name.endswith(suffix)]
                     if not candidates:
                         raise FileNotFoundError(requested_format)
                     path, filename = self.store.artifact(cert_id, candidates[0])
