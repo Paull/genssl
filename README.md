@@ -30,9 +30,9 @@ subjectAltName=DNS:*.one.dev,DNS:one.dev,DNS:*.two.dev,DNS:two.dev,DNS:*.three.d
 ```
 把 `<domain>` 替换成你的域名，例如 `example.dev`
 
-运行的输出像这样：
+生成证书后，终端会打印输出目录和文件路径；在线管理界面如下：
 
-![Output Screen](docs/output.png)
+![证书总览](docs/screenshots/dashboard-empty.png)
 
 如果有多个项目网站，可以把所有网站都加上去，用空格隔开。
 
