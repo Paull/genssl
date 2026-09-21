@@ -19,6 +19,8 @@ services:
       CERT_DB: /app/out/certificates.db
       CERT_WEB_DIR: /app/web
       ROOTPASS: "${ROOTPASS:?Set ROOTPASS in .env or the shell before starting}"
+      WEB_USERNAME: "${WEB_USERNAME:?Set WEB_USERNAME in .env or the shell before starting}"
+      WEB_PASSWORD: "${WEB_PASSWORD:?Set WEB_PASSWORD in .env or the shell before starting}"
     volumes:
       - certificate-data:/app/out
     healthcheck:

@@ -8,7 +8,9 @@ small SQLite catalog and a read/download API around the files in ``out/``.
 from __future__ import annotations
 
 import argparse
+import base64
 import datetime as _dt
+import hmac
 import io
 import json
 import mimetypes
@@ -362,6 +364,34 @@ class APIHandler(BaseHTTPRequestHandler):
         if not getattr(self, "_head_only", False):
             self.wfile.write(body)
 
+    def _send_auth_required(self) -> None:
+        body = _json_bytes({"error": "authentication required"})
+        self.send_response(HTTPStatus.UNAUTHORIZED)
+        self.send_header("WWW-Authenticate", 'Basic realm="CornTech Certificate Manager", charset="UTF-8"')
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        if not getattr(self, "_head_only", False):
+            self.wfile.write(body)
+
+    def _require_auth(self) -> bool:
+        username = getattr(self.server, "web_username", None)
+        password = getattr(self.server, "web_password", None)
+        if not username and not password:
+            return True
+        authorization = self.headers.get("Authorization", "")
+        if authorization.startswith("Basic "):
+            try:
+                decoded = base64.b64decode(authorization[6:], validate=True).decode("utf-8")
+                supplied_username, separator, supplied_password = decoded.partition(":")
+                if separator and hmac.compare_digest(supplied_username, username or "") and hmac.compare_digest(supplied_password, password or ""):
+                    return True
+            except (ValueError, UnicodeDecodeError):
+                pass
+        self._send_auth_required()
+        return False
+
     def _static_root(self) -> Path:
         """Return the configured frontend directory.
 
@@ -449,6 +479,8 @@ class APIHandler(BaseHTTPRequestHandler):
             raise CertificateError(f"invalid JSON: {exc.msg}")
 
     def do_OPTIONS(self) -> None:
+        if not self._require_auth():
+            return
         self.send_response(HTTPStatus.NO_CONTENT)
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
@@ -457,6 +489,8 @@ class APIHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         path = urlsplit(self.path).path.rstrip("/") or "/"
+        if path != "/api/health" and not self._require_auth():
+            return
         if path == "/":
             if not self._serve_static("/"):
                 self._send_json(200, {"name": "Corn Certificate Manager", "api": "/api/health"})
@@ -538,6 +572,8 @@ class APIHandler(BaseHTTPRequestHandler):
         self._send_json(404, {"error": "not found"})
 
     def do_POST(self) -> None:
+        if not self._require_auth():
+            return
         path = urlsplit(self.path).path.rstrip("/") or "/"
         parts = path.strip("/").split("/")
         if parts[:1] == ["api"] and len(parts) >= 2 and parts[1] == "v1":
@@ -583,10 +619,18 @@ def create_server(
     root_dir: Path = ROOT_DIR,
     db_path: Path = DB_PATH,
     web_dir: Optional[Path] = None,
+    web_username: Optional[str] = None,
+    web_password: Optional[str] = None,
 ) -> ThreadingHTTPServer:
+    web_username = os.environ.get("WEB_USERNAME") if web_username is None else web_username
+    web_password = os.environ.get("WEB_PASSWORD") if web_password is None else web_password
+    if bool(web_username) != bool(web_password):
+        raise ValueError("WEB_USERNAME and WEB_PASSWORD must be set together")
     store = CertificateStore(root_dir, db_path)
     httpd = ThreadingHTTPServer((host, port), APIHandler)
     httpd.store = store  # type: ignore[attr-defined]
+    httpd.web_username = web_username or None  # type: ignore[attr-defined]
+    httpd.web_password = web_password or None  # type: ignore[attr-defined]
     if web_dir:
         configured_web_dir = Path(web_dir)
         if not configured_web_dir.is_absolute():

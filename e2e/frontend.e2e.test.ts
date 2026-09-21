@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from 'bun:test';
-import { chromium, type Browser, type Page } from 'playwright';
+import { chromium, type Browser, type BrowserContext, type Page } from 'playwright';
 import { cp, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -13,6 +13,7 @@ const rootPassword = 'e2e-root-password';
 let browser: Browser;
 
 type Fixture = { baseURL: string; stop: () => Promise<void> };
+type FixtureOptions = { webUsername?: string; webPassword?: string };
 
 async function waitForReady(process: ReturnType<typeof Bun.spawn>): Promise<string> {
   if (!process.stdout || typeof process.stdout === 'number') throw new Error('fixture server has no stdout');
@@ -35,7 +36,7 @@ async function waitForReady(process: ReturnType<typeof Bun.spawn>): Promise<stri
   throw new Error(`fixture server exited before becoming ready: ${output}`);
 }
 
-async function startFixture(): Promise<Fixture> {
+async function startFixture(options: FixtureOptions = {}): Promise<Fixture> {
   const fixtureRoot = await mkdtemp(join(tmpdir(), 'corntech-e2e-'));
   let serverProcess: ReturnType<typeof Bun.spawn> | undefined;
   let fixtureStderr: Promise<string> | undefined;
@@ -50,7 +51,12 @@ async function startFixture(): Promise<Fixture> {
     await writeFile(join(fixtureRoot, '.fixture'), 'isolated\n');
     serverProcess = Bun.spawn(['python3', fixtureServer, '--root', fixtureRoot, '--web-dir', join(repoRoot, 'web')], {
       cwd: repoRoot,
-      env: { ...process.env, ROOTPASS: rootPassword },
+      env: {
+        ...process.env,
+        ROOTPASS: rootPassword,
+        WEB_USERNAME: options.webUsername || '',
+        WEB_PASSWORD: options.webPassword || '',
+      },
       stdout: 'pipe',
       stderr: 'pipe',
     });
@@ -150,6 +156,7 @@ describe('user frontend', () => {
       expect((await responsePromise).status()).toBe(200);
 
       await page.waitForFunction(() => !document.querySelector('#overlay')?.classList.contains('open'));
+      await page.waitForFunction(() => document.querySelector('#ca-status-title')?.textContent === 'CA 状态正常');
       await expectText(page, '#ca-status-title', 'CA 状态正常');
       await expectText(page, '#ca-roots', '可用');
       await expectText(page, '#toast-region', '根 CA 初始化完成');
@@ -268,6 +275,7 @@ describe('user frontend', () => {
       await page.locator('#ca-form button[type="submit"]').click();
       expect((await caResponse).status()).toBe(200);
       await page.waitForFunction(() => !document.querySelector('#overlay')?.classList.contains('open'));
+      await page.waitForFunction(() => document.querySelector('#ca-status-title')?.textContent === 'CA 状态正常');
       await expectText(page, '#ca-status-title', 'CA 状态正常');
 
       await page.locator('[data-action="register"]').click();
@@ -427,6 +435,35 @@ describe('user frontend', () => {
       expect((await apiRequest(fixture.baseURL, `/api/certificates/${record.id + 999}/download`)).status).toBe(404);
       expect((await apiRequest(fixture.baseURL, '/api/certificates/not-an-id')).status).toBe(400);
     } finally {
+      await fixture.stop();
+    }
+  });
+
+  test('protects the website entry and API with configured Basic Auth', async () => {
+    const username = 'e2e-admin';
+    const password = 'e2e-web-password';
+    const fixture = await startFixture({ webUsername: username, webPassword: password });
+    let context: BrowserContext | undefined;
+    try {
+      expect((await apiRequest(fixture.baseURL, '/api/health')).status).toBe(200);
+      const unauthorized = await apiRequest(fixture.baseURL, '/');
+      expect(unauthorized.status).toBe(401);
+      expect(unauthorized.headers.get('www-authenticate')).toContain('Basic realm=');
+      expect((await apiRequest(fixture.baseURL, '/api/certificates')).status).toBe(401);
+
+      const authorization = `Basic ${btoa(`${username}:${password}`)}`;
+      const authorized = await apiRequest(fixture.baseURL, '/', { headers: { Authorization: authorization } });
+      expect(authorized.status).toBe(200);
+      expect(authorized.headers.get('content-type')).toContain('text/html');
+
+      context = await browser.newContext({ httpCredentials: { username, password } });
+      const page = await context.newPage();
+      page.setDefaultTimeout(30_000);
+      await page.goto(fixture.baseURL, { waitUntil: 'domcontentloaded' });
+      await page.getByRole('heading', { name: '证书总览' }).waitFor({ state: 'visible' });
+      await page.waitForFunction(() => document.querySelector('#connection-text')?.textContent === '服务在线');
+    } finally {
+      await context?.close();
       await fixture.stop();
     }
   });

@@ -123,12 +123,12 @@ ROOTPASS='change-me' python3 server.py --host 0.0.0.0 --port 8080
 
 ```bash
 cp .env.example .env
-# 编辑 .env，设置强随机 ROOTPASS
+# 编辑 .env，设置强随机 ROOTPASS、WEB_USERNAME 和 WEB_PASSWORD
 docker compose up --build -d
 docker compose ps
 ```
 
-容器健康检查使用 `/api/health`；服务正常后访问 <http://127.0.0.1:8080/>，在界面中初始化根 CA。修改 `.env` 中的 `CERT_PORT` 可以更换宿主机端口。备份生产数据时停止服务并备份该 volume；不要删除它，否则会丢失根 CA 私钥和已签发证书。
+访问 <http://127.0.0.1:8080/> 时使用 `WEB_USERNAME` / `WEB_PASSWORD` 登录；网站入口、静态资源、API 和证书下载都会要求 Basic Auth。只有 `/api/health` 保持公开，供 Docker 健康检查使用。服务正常后在界面中初始化根 CA。修改 `.env` 中的 `CERT_PORT` 可以更换宿主机端口。备份生产数据时停止服务并备份该 volume；不要删除它，否则会丢失根 CA 私钥和已签发证书。
 
 ### Bun E2E 测试
 
